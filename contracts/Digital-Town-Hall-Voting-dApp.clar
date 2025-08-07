@@ -463,3 +463,96 @@
 (define-read-only (get-total-registered-voters)
     (ok (var-get total-registered-voters))
 )
+
+(define-constant err-amendment-window-closed (err u106))
+(define-constant err-max-amendments-reached (err u107))
+
+(define-data-var amendment-counter uint u0)
+
+(define-map ProposalAmendments
+    {
+        proposal-id: uint,
+        amendment-id: uint,
+    }
+    {
+        amendment-text: (string-ascii 500),
+        created-at: uint,
+        creator: principal,
+    }
+)
+
+(define-map ProposalAmendmentCount
+    { proposal-id: uint }
+    { count: uint }
+)
+
+(define-public (create-amendment
+        (proposal-id uint)
+        (amendment-text (string-ascii 500))
+    )
+    (let (
+            (proposal (unwrap! (map-get? Proposals-Enhanced { proposal-id: proposal-id })
+                err-no-proposal
+            ))
+            (current-count (default-to { count: u0 }
+                (map-get? ProposalAmendmentCount { proposal-id: proposal-id })
+            ))
+            (new-amendment-id (+ (var-get amendment-counter) u1))
+            (voting-window-remaining (- (get end-block proposal) burn-block-height))
+            (amendment-deadline (- (get end-block proposal) (/ voting-window-remaining u4)))
+        )
+        (asserts! (is-eq tx-sender (get creator proposal)) err-not-authorized)
+        (asserts! (is-eq (get status proposal) "active") err-voting-closed)
+        (asserts! (< burn-block-height amendment-deadline)
+            err-amendment-window-closed
+        )
+        (asserts! (< (get count current-count) u3) err-max-amendments-reached)
+        (map-set ProposalAmendments {
+            proposal-id: proposal-id,
+            amendment-id: new-amendment-id,
+        } {
+            amendment-text: amendment-text,
+            created-at: burn-block-height,
+            creator: tx-sender,
+        })
+        (map-set ProposalAmendmentCount { proposal-id: proposal-id } { count: (+ (get count current-count) u1) })
+        (var-set amendment-counter new-amendment-id)
+        (ok new-amendment-id)
+    )
+)
+
+(define-read-only (get-proposal-amendments (proposal-id uint))
+    (let ((amendment-count (default-to { count: u0 }
+            (map-get? ProposalAmendmentCount { proposal-id: proposal-id })
+        )))
+        (ok (get count amendment-count))
+    )
+)
+
+(define-read-only (get-amendment-details
+        (proposal-id uint)
+        (amendment-id uint)
+    )
+    (map-get? ProposalAmendments {
+        proposal-id: proposal-id,
+        amendment-id: amendment-id,
+    })
+)
+
+(define-read-only (get-amendment-window-status (proposal-id uint))
+    (let (
+            (proposal (unwrap! (map-get? Proposals-Enhanced { proposal-id: proposal-id })
+                err-no-proposal
+            ))
+            (voting-window-remaining (- (get end-block proposal) burn-block-height))
+            (amendment-deadline (- (get end-block proposal) (/ voting-window-remaining u4)))
+        )
+        (ok {
+            can-amend: (and
+                (< burn-block-height amendment-deadline)
+                (is-eq (get status proposal) "active")
+            ),
+            deadline-block: amendment-deadline,
+        })
+    )
+)
