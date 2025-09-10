@@ -412,6 +412,7 @@
                 total-participants: (+ (get total-participants proposal) u1),
             })
         )
+        (update-user-reputation tx-sender u1 u0 u0)
         (ok true)
     )
 )
@@ -517,6 +518,7 @@
         })
         (map-set ProposalAmendmentCount { proposal-id: proposal-id } { count: (+ (get count current-count) u1) })
         (var-set amendment-counter new-amendment-id)
+        (update-user-reputation tx-sender u0 u0 u1)
         (ok new-amendment-id)
     )
 )
@@ -554,5 +556,212 @@
             ),
             deadline-block: amendment-deadline,
         })
+    )
+)
+
+(define-map CommunityReputation
+    { user: principal }
+    {
+        total-votes: uint,
+        proposals-created: uint,
+        amendments-made: uint,
+        reputation-score: uint,
+        last-activity: uint,
+    }
+)
+
+(define-map ReputationWeightedProposals
+    { proposal-id: uint }
+    {
+        requires-reputation: bool,
+        min-reputation-score: uint,
+    }
+)
+
+(define-private (calculate-reputation-score
+        (votes uint)
+        (proposals uint)
+        (amendments uint)
+    )
+    (+ (* votes u10) (* proposals u50) (* amendments u25))
+)
+
+(define-private (update-user-reputation
+        (user principal)
+        (vote-increment uint)
+        (proposal-increment uint)
+        (amendment-increment uint)
+    )
+    (let (
+            (current-rep (default-to {
+                total-votes: u0,
+                proposals-created: u0,
+                amendments-made: u0,
+                reputation-score: u0,
+                last-activity: u0,
+            }
+                (map-get? CommunityReputation { user: user })
+            ))
+            (new-votes (+ (get total-votes current-rep) vote-increment))
+            (new-proposals (+ (get proposals-created current-rep) proposal-increment))
+            (new-amendments (+ (get amendments-made current-rep) amendment-increment))
+            (new-score (calculate-reputation-score new-votes new-proposals new-amendments))
+        )
+        (map-set CommunityReputation { user: user } {
+            total-votes: new-votes,
+            proposals-created: new-proposals,
+            amendments-made: new-amendments,
+            reputation-score: new-score,
+            last-activity: burn-block-height,
+        })
+        new-score
+    )
+)
+
+(define-public (create-reputation-weighted-proposal
+        (title (string-ascii 100))
+        (description (string-ascii 500))
+        (duration uint)
+        (category (string-ascii 20))
+        (min-reputation uint)
+    )
+    (let (
+            (new-id (+ (var-get proposal-counter) u1))
+            (start-block burn-block-height)
+            (end-block (+ burn-block-height duration))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (asserts!
+            (is-some (map-get? CategoryRequirements { category: category }))
+            err-invalid-vote
+        )
+        (map-set Proposals-Enhanced { proposal-id: new-id } {
+            title: title,
+            description: description,
+            creator: tx-sender,
+            start-block: start-block,
+            end-block: end-block,
+            yes-votes: u0,
+            no-votes: u0,
+            status: "active",
+            category: category,
+            total-participants: u0,
+        })
+        (map-set ReputationWeightedProposals { proposal-id: new-id } {
+            requires-reputation: true,
+            min-reputation-score: min-reputation,
+        })
+        (update-user-reputation tx-sender u0 u1 u0)
+        (var-set proposal-counter new-id)
+        (ok new-id)
+    )
+)
+
+(define-public (cast-reputation-weighted-vote
+        (proposal-id uint)
+        (vote bool)
+    )
+    (let (
+            (proposal (unwrap! (map-get? Proposals-Enhanced { proposal-id: proposal-id })
+                err-no-proposal
+            ))
+            (reputation-req (unwrap!
+                (map-get? ReputationWeightedProposals { proposal-id: proposal-id })
+                err-invalid-vote
+            ))
+            (voter-record (get-voter-status proposal-id tx-sender))
+            (voter-registration (unwrap! (map-get? RegisteredVoters { voter: tx-sender })
+                err-not-authorized
+            ))
+            (user-reputation (default-to {
+                total-votes: u0,
+                proposals-created: u0,
+                amendments-made: u0,
+                reputation-score: u0,
+                last-activity: u0,
+            }
+                (map-get? CommunityReputation { user: tx-sender })
+            ))
+            (vote-weight (if (>= (get reputation-score user-reputation) u100)
+                u2
+                u1
+            ))
+        )
+        (asserts! (get registered voter-registration) err-not-authorized)
+        (asserts! (get requires-reputation reputation-req) err-invalid-vote)
+        (asserts!
+            (>= (get reputation-score user-reputation)
+                (get min-reputation-score reputation-req)
+            )
+            err-not-authorized
+        )
+        (asserts! (< burn-block-height (get end-block proposal))
+            err-voting-closed
+        )
+        (asserts! (> burn-block-height (get start-block proposal))
+            err-invalid-vote
+        )
+        (asserts! (not (get voted voter-record)) err-already-voted)
+        (map-set VoterRecords {
+            voter: tx-sender,
+            proposal-id: proposal-id,
+        } { voted: true }
+        )
+        (map-set Proposals-Enhanced { proposal-id: proposal-id }
+            (merge proposal {
+                yes-votes: (if vote
+                    (+ (get yes-votes proposal) vote-weight)
+                    (get yes-votes proposal)
+                ),
+                no-votes: (if (not vote)
+                    (+ (get no-votes proposal) vote-weight)
+                    (get no-votes proposal)
+                ),
+                total-participants: (+ (get total-participants proposal) u1),
+            })
+        )
+        (update-user-reputation tx-sender u1 u0 u0)
+        (ok true)
+    )
+)
+
+(define-read-only (get-user-reputation (user principal))
+    (map-get? CommunityReputation { user: user })
+)
+
+(define-read-only (get-reputation-requirements (proposal-id uint))
+    (map-get? ReputationWeightedProposals { proposal-id: proposal-id })
+)
+
+(define-read-only (check-voting-eligibility
+        (proposal-id uint)
+        (user principal)
+    )
+    (let (
+            (reputation-req (map-get? ReputationWeightedProposals { proposal-id: proposal-id }))
+            (user-reputation (default-to {
+                total-votes: u0,
+                proposals-created: u0,
+                amendments-made: u0,
+                reputation-score: u0,
+                last-activity: u0,
+            }
+                (map-get? CommunityReputation { user: user })
+            ))
+        )
+        (match reputation-req
+            req (ok {
+                eligible: (>= (get reputation-score user-reputation)
+                    (get min-reputation-score req)
+                ),
+                user-score: (get reputation-score user-reputation),
+                required-score: (get min-reputation-score req),
+            })
+            (ok {
+                eligible: true,
+                user-score: (get reputation-score user-reputation),
+                required-score: u0,
+            })
+        )
     )
 )
