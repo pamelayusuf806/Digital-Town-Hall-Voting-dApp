@@ -102,6 +102,8 @@
                 ),
             })
         )
+        ;; Record analytics for this vote
+        (record-vote-analytics proposal-id tx-sender burn-block-height)
         (ok true)
     )
 )
@@ -252,6 +254,8 @@
                 ),
             })
         )
+        ;; Record analytics for delegated vote
+        (record-vote-analytics proposal-id tx-sender burn-block-height)
         (ok true)
     )
 )
@@ -412,6 +416,8 @@
                 total-participants: (+ (get total-participants proposal) u1),
             })
         )
+        ;; Record analytics for categorized vote
+        (record-vote-analytics proposal-id tx-sender burn-block-height)
         (update-user-reputation tx-sender u1 u0 u0)
         (ok true)
     )
@@ -720,6 +726,8 @@
                 total-participants: (+ (get total-participants proposal) u1),
             })
         )
+        ;; Record analytics for reputation-weighted vote
+        (record-vote-analytics proposal-id tx-sender burn-block-height)
         (update-user-reputation tx-sender u1 u0 u0)
         (ok true)
     )
@@ -762,6 +770,498 @@
                 user-score: (get reputation-score user-reputation),
                 required-score: u0,
             })
+        )
+    )
+)
+
+;; ===== GOVERNANCE ANALYTICS AND REPORTING SYSTEM =====
+
+;; Error constants for analytics operations
+(define-constant err-invalid-time-period (err u108))
+(define-constant err-analytics-not-found (err u109))
+(define-constant err-report-generation-failed (err u110))
+
+;; Analytics constants and thresholds
+(define-constant analytics-version u1)
+(define-constant max-historical-periods u52) ;; Track up to 52 periods (weeks/months)
+(define-constant high-participation-threshold u75) ;; 75% participation considered high
+(define-constant low-participation-threshold u25) ;; 25% participation considered low
+
+;; Data structures for governance analytics
+(define-data-var analytics-counter uint u0)
+(define-data-var last-analytics-update uint u0)
+
+;; Governance metrics per proposal
+(define-map GovernanceMetrics
+    { proposal-id: uint }
+    {
+        total-eligible-voters: uint,
+        actual-participants: uint,
+        participation-rate: uint, ;; Percentage * 100 for precision
+        average-vote-time: uint, ;; Average blocks from start to vote
+        voting-distribution: { early: uint, mid: uint, late: uint },
+        category-performance: (string-ascii 20),
+        created-at: uint,
+    }
+)
+
+;; Historical participation tracking
+(define-map ParticipationHistory
+    {
+        period-id: uint,
+        period-type: (string-ascii 10), ;; "weekly", "monthly"
+    }
+    {
+        start-block: uint,
+        end-block: uint,
+        total-proposals: uint,
+        total-votes-cast: uint,
+        active-voters: uint,
+        average-participation: uint,
+        governance-health-score: uint,
+    }
+)
+
+;; Voting trends and patterns
+(define-map VotingTrends
+    {
+        trend-type: (string-ascii 20), ;; "daily", "category", "user_behavior"
+        identifier: (string-ascii 50), ;; Category name or time period
+    }
+    {
+        sample-size: uint,
+        positive-votes: uint,
+        negative-votes: uint,
+        trend-direction: (string-ascii 10), ;; "increasing", "decreasing", "stable"
+        confidence-level: uint,
+        last-updated: uint,
+    }
+)
+
+;; Governance reports storage
+(define-map GovernanceReports
+    {
+        report-id: uint,
+        report-type: (string-ascii 20), ;; "summary", "detailed", "trends"
+    }
+    {
+        generated-at: uint,
+        period-start: uint,
+        period-end: uint,
+        key-metrics: {
+            total-proposals: uint,
+            total-participants: uint,
+            governance-health: uint,
+            engagement-trend: (string-ascii 10),
+        },
+        recommendations: (string-ascii 200),
+        next-review-block: uint,
+    }
+)
+
+;; Voter activity analytics
+(define-map VoterActivityAnalytics
+    { voter: principal }
+    {
+        first-vote-block: uint,
+        last-vote-block: uint,
+        total-votes-cast: uint,
+        categories-engaged: uint, ;; Bitmask for categories participated
+        participation-streak: uint,
+        avg-response-time: uint,
+        engagement-score: uint,
+    }
+)
+
+;; Private helper functions for analytics calculations
+(define-private (calculate-participation-rate (participants uint) (eligible uint))
+    (if (> eligible u0)
+        (/ (* participants u10000) eligible) ;; Return percentage * 100 for precision
+        u0
+    )
+)
+
+(define-private (calculate-governance-health
+        (participation uint)
+        (proposal-count uint)
+        (voter-diversity uint)
+    )
+    (let (
+            (participation-score (if (>= participation high-participation-threshold)
+                u40
+                (if (<= participation low-participation-threshold)
+                    u10
+                    (+ u10 (/ (* (- participation low-participation-threshold) u30)
+                        (- high-participation-threshold low-participation-threshold))
+                    )
+                )
+            ))
+            (activity-score (if (< (* proposal-count u5) u30) (* proposal-count u5) u30))
+            (diversity-score (if (< (* voter-diversity u2) u30) (* voter-diversity u2) u30))
+        )
+        (+ participation-score activity-score diversity-score)
+    )
+)
+
+(define-private (determine-trend-direction
+        (current-value uint)
+        (previous-value uint)
+        (threshold uint)
+    )
+    (let ((difference (if (>= current-value previous-value)
+            (- current-value previous-value)
+            (- previous-value current-value)
+        )))
+        (if (> difference threshold)
+            (if (> current-value previous-value) "increasing" "decreasing")
+            "stable"
+        )
+    )
+)
+
+;; Core analytics recording functions
+(define-private (record-vote-analytics
+        (proposal-id uint)
+        (voter principal)
+        (vote-block uint)
+    )
+    (let (
+            (proposal-opt (map-get? Proposals-Enhanced { proposal-id: proposal-id }))
+        )
+        (if (is-some proposal-opt)
+            (let (
+                (proposal (unwrap-panic proposal-opt))
+                (current-metrics (map-get? GovernanceMetrics { proposal-id: proposal-id }))
+                (vote-timing (- vote-block (get start-block proposal)))
+                (proposal-duration (- (get end-block proposal) (get start-block proposal)))
+                (timing-category (if (< vote-timing (/ proposal-duration u3))
+                    "early"
+                    (if (< vote-timing (* proposal-duration u2))
+                        "mid"
+                        "late"
+                    )
+                ))
+        )
+        (match current-metrics
+            existing-metrics
+            (let (
+                    (current-dist (get voting-distribution existing-metrics))
+                    (updated-distribution
+                        (if (is-eq timing-category "early")
+                            { 
+                                early: (+ (get early current-dist) u1), 
+                                mid: (get mid current-dist), 
+                                late: (get late current-dist) 
+                            }
+                            (if (is-eq timing-category "mid")
+                                { 
+                                    early: (get early current-dist), 
+                                    mid: (+ (get mid current-dist) u1), 
+                                    late: (get late current-dist) 
+                                }
+                                { 
+                                    early: (get early current-dist), 
+                                    mid: (get mid current-dist), 
+                                    late: (+ (get late current-dist) u1) 
+                                }
+                            )
+                        )
+                    )
+                    (new-participant-count (+ (get actual-participants existing-metrics) u1))
+                    (new-participation-rate (calculate-participation-rate
+                        new-participant-count
+                        (get total-eligible-voters existing-metrics)
+                    ))
+                )
+                (map-set GovernanceMetrics { proposal-id: proposal-id }
+                    (merge existing-metrics {
+                        actual-participants: new-participant-count,
+                        participation-rate: new-participation-rate,
+                        voting-distribution: updated-distribution,
+                    })
+                )
+            )
+            ;; Initialize metrics if first vote
+            (let (
+                    (eligible-voters (var-get total-registered-voters))
+                    (initial-distribution
+                        (if (is-eq timing-category "early")
+                            { early: u1, mid: u0, late: u0 }
+                            (if (is-eq timing-category "mid")
+                                { early: u0, mid: u1, late: u0 }
+                                { early: u0, mid: u0, late: u1 }
+                            )
+                        )
+                    )
+                )
+                (map-set GovernanceMetrics { proposal-id: proposal-id } {
+                    total-eligible-voters: eligible-voters,
+                    actual-participants: u1,
+                    participation-rate: (calculate-participation-rate u1 eligible-voters),
+                    average-vote-time: vote-timing,
+                    voting-distribution: initial-distribution,
+                    category-performance: (get category proposal),
+                    created-at: burn-block-height,
+                })
+            )
+        )
+                ;; Update voter activity analytics
+                (update-voter-activity-analytics voter proposal-id vote-block)
+                true
+            )
+            false ;; Return false if proposal not found
+        )
+    )
+)
+
+(define-private (update-voter-activity-analytics
+        (voter principal)
+        (proposal-id uint)
+        (vote-block uint)
+    )
+    (let (
+            (current-activity (map-get? VoterActivityAnalytics { voter: voter }))
+            (proposal (unwrap! (map-get? Proposals-Enhanced { proposal-id: proposal-id })
+                false
+            ))
+        )
+        (match current-activity
+            existing-activity
+            (let (
+                    (new-vote-count (+ (get total-votes-cast existing-activity) u1))
+                    (response-time (- vote-block (get start-block proposal)))
+                    (new-avg-response (/ (+ (* (get avg-response-time existing-activity)
+                                                (- new-vote-count u1)
+                                            )
+                                            response-time
+                                        )
+                                        new-vote-count
+                                    ))
+                    (engagement-boost (if (< response-time u100) u5 u1))
+                    (new-engagement (+ (get engagement-score existing-activity) engagement-boost))
+                )
+                (map-set VoterActivityAnalytics { voter: voter }
+                    (merge existing-activity {
+                        last-vote-block: vote-block,
+                        total-votes-cast: new-vote-count,
+                        avg-response-time: new-avg-response,
+                        engagement-score: new-engagement,
+                    })
+                )
+            )
+            ;; Initialize voter activity
+            (map-set VoterActivityAnalytics { voter: voter } {
+                first-vote-block: vote-block,
+                last-vote-block: vote-block,
+                total-votes-cast: u1,
+                categories-engaged: u1,
+                participation-streak: u1,
+                avg-response-time: (- vote-block (get start-block proposal)),
+                engagement-score: u10,
+            })
+        )
+        true
+    )
+)
+
+;; Public read-only functions for accessing governance analytics
+(define-read-only (get-governance-summary)
+    (let (
+            (current-block burn-block-height)
+            (total-proposals (var-get proposal-counter))
+            (total-voters (var-get total-registered-voters))
+            (recent-period-start (if (> current-block u1000) (- current-block u1000) u0))
+        )
+        (ok {
+            total-proposals: total-proposals,
+            total-registered-voters: total-voters,
+            governance-health-score: (calculate-governance-health
+                (if (> total-voters u0)
+                    (/ (* total-proposals u100) total-voters)
+                    u0
+                )
+                total-proposals
+                total-voters
+            ),
+            analytics-version: analytics-version,
+            last-updated: (var-get last-analytics-update),
+            summary-generated-at: current-block,
+        })
+    )
+)
+
+(define-read-only (get-proposal-analytics (proposal-id uint))
+    (let ((metrics (map-get? GovernanceMetrics { proposal-id: proposal-id })))
+        (match metrics
+            found-metrics (ok found-metrics)
+            (err err-analytics-not-found)
+        )
+    )
+)
+
+(define-read-only (get-voting-statistics (period-start uint) (period-end uint))
+    (if (and (> period-end period-start) (<= period-end burn-block-height))
+        (let (
+                (period-length (- period-end period-start))
+                (estimated-proposals (/ period-length u144)) ;; Rough estimate based on block time
+            )
+            (ok {
+                period-start: period-start,
+                period-end: period-end,
+                estimated-activity: estimated-proposals,
+                data-quality: (if (> period-length u1000) "high" "low"),
+                generated-at: burn-block-height,
+            })
+        )
+        (err err-invalid-time-period)
+    )
+)
+
+(define-read-only (get-voter-activity-report (voter principal))
+    (let ((activity (map-get? VoterActivityAnalytics { voter: voter })))
+        (match activity
+            found-activity (ok {
+                voter: voter,
+                has-activity: true,
+                total-votes: (get total-votes-cast found-activity),
+                engagement-score: (get engagement-score found-activity),
+                engagement-level: (if (>= (get engagement-score found-activity) u50)
+                    "high"
+                    (if (>= (get engagement-score found-activity) u20)
+                        "medium"
+                        "low"
+                    )
+                ),
+                generated-at: burn-block-height,
+            })
+            (ok {
+                voter: voter,
+                has-activity: false,
+                total-votes: u0,
+                engagement-score: u0,
+                engagement-level: "none",
+                generated-at: burn-block-height,
+            })
+        )
+    )
+)
+
+(define-read-only (get-category-performance-analytics (category (string-ascii 20)))
+    (let (
+            (category-requirements (map-get? CategoryRequirements { category: category }))
+        )
+        (match category-requirements
+            found-req (ok {
+                category: category,
+                requirements: found-req,
+                performance-data: {
+                    min-participation-met: true, ;; Simplified for this implementation
+                    avg-approval-rate: u55, ;; Placeholder - would calculate from actual data
+                    trend: "stable",
+                },
+                last-analyzed: burn-block-height,
+            })
+            (err err-invalid-vote)
+        )
+    )
+)
+
+(define-read-only (analyze-voting-trends (trend-type (string-ascii 20)))
+    (let ((trends (map-get? VotingTrends { trend-type: trend-type, identifier: "global" })))
+        (match trends
+            found-trends (ok {
+                trend-type: trend-type,
+                has-data: true,
+                sample-size: (get sample-size found-trends),
+                positive-votes: (get positive-votes found-trends),
+                negative-votes: (get negative-votes found-trends),
+                insights: {
+                    dominant-pattern: (if (> (get positive-votes found-trends) (get negative-votes found-trends))
+                        "positive-leaning"
+                        "negative-leaning"
+                    ),
+                    engagement-quality: (if (> (get sample-size found-trends) u20) "sufficient" "limited"),
+                    reliability: (get confidence-level found-trends),
+                },
+                generated-at: burn-block-height,
+            })
+            (ok {
+                trend-type: trend-type,
+                has-data: false,
+                sample-size: u0,
+                positive-votes: u0,
+                negative-votes: u0,
+                insights: {
+                    dominant-pattern: "insufficient-data",
+                    engagement-quality: "insufficient",
+                    reliability: u0,
+                },
+                generated-at: burn-block-height,
+            })
+        )
+    )
+)
+
+(define-read-only (get-governance-health-metrics)
+    (let (
+            (total-proposals (var-get proposal-counter))
+            (total-voters (var-get total-registered-voters))
+            (current-block burn-block-height)
+        )
+        (ok {
+            overall-health: (calculate-governance-health
+                (if (> total-voters u0)
+                    (/ (* total-proposals u100) total-voters)
+                    u0
+                )
+                total-proposals
+                total-voters
+            ),
+            participation-metrics: {
+                registered-voters: total-voters,
+                active-proposals: total-proposals,
+                engagement-ratio: (if (> total-voters u0)
+                    (/ (* total-proposals u100) total-voters)
+                    u0
+                ),
+            },
+            health-indicators: {
+                voter-growth: "stable", ;; Simplified
+                proposal-activity: "moderate", ;; Simplified
+                community-engagement: "healthy", ;; Simplified
+            },
+            generated-at: current-block,
+            next-assessment: (+ current-block u1000),
+        })
+    )
+)
+
+;; Advanced analytics functions
+(define-read-only (get-participation-trends (blocks-back uint))
+    (let (
+            (current-block burn-block-height)
+            (analysis-start (if (> current-block blocks-back) (- current-block blocks-back) u0))
+        )
+        (if (<= blocks-back max-historical-periods)
+            (ok {
+                analysis-period: {
+                    start-block: analysis-start,
+                    end-block: current-block,
+                    blocks-analyzed: blocks-back,
+                },
+                trend-analysis: {
+                    direction: "stable", ;; Simplified for implementation
+                    strength: u50,
+                    confidence: u75,
+                },
+                key-insights: {
+                    peak-activity-period: "recent",
+                    participation-consistency: "moderate",
+                    seasonal-patterns: none,
+                },
+                generated-at: current-block,
+            })
+            (err err-invalid-time-period)
         )
     )
 )
