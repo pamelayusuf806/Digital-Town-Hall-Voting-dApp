@@ -463,6 +463,14 @@
     (map-get? Proposals-Enhanced { proposal-id: proposal-id })
 )
 
+(define-read-only (get-proposal-results-batch (proposal-ids (list 50 uint)))
+    (map get-proposal-results proposal-ids)
+)
+
+(define-read-only (get-enhanced-proposals-batch (proposal-ids (list 50 uint)))
+    (map get-enhanced-proposal proposal-ids)
+)
+
 (define-read-only (get-category-requirements (category (string-ascii 20)))
     (map-get? CategoryRequirements { category: category })
 )
@@ -799,7 +807,11 @@
         actual-participants: uint,
         participation-rate: uint, ;; Percentage * 100 for precision
         average-vote-time: uint, ;; Average blocks from start to vote
-        voting-distribution: { early: uint, mid: uint, late: uint },
+        voting-distribution: {
+            early: uint,
+            mid: uint,
+            late: uint,
+        },
         category-performance: (string-ascii 20),
         created-at: uint,
     }
@@ -874,7 +886,10 @@
 )
 
 ;; Private helper functions for analytics calculations
-(define-private (calculate-participation-rate (participants uint) (eligible uint))
+(define-private (calculate-participation-rate
+        (participants uint)
+        (eligible uint)
+    )
     (if (> eligible u0)
         (/ (* participants u10000) eligible) ;; Return percentage * 100 for precision
         u0
@@ -891,13 +906,22 @@
                 u40
                 (if (<= participation low-participation-threshold)
                     u10
-                    (+ u10 (/ (* (- participation low-participation-threshold) u30)
-                        (- high-participation-threshold low-participation-threshold))
+                    (+ u10
+                        (/ (* (- participation low-participation-threshold) u30)
+                            (- high-participation-threshold
+                                low-participation-threshold
+                            ))
                     )
                 )
             ))
-            (activity-score (if (< (* proposal-count u5) u30) (* proposal-count u5) u30))
-            (diversity-score (if (< (* voter-diversity u2) u30) (* voter-diversity u2) u30))
+            (activity-score (if (< (* proposal-count u5) u30)
+                (* proposal-count u5)
+                u30
+            ))
+            (diversity-score (if (< (* voter-diversity u2) u30)
+                (* voter-diversity u2)
+                u30
+            ))
         )
         (+ participation-score activity-score diversity-score)
     )
@@ -913,7 +937,10 @@
             (- previous-value current-value)
         )))
         (if (> difference threshold)
-            (if (> current-value previous-value) "increasing" "decreasing")
+            (if (> current-value previous-value)
+                "increasing"
+                "decreasing"
+            )
             "stable"
         )
     )
@@ -925,86 +952,91 @@
         (voter principal)
         (vote-block uint)
     )
-    (let (
-            (proposal-opt (map-get? Proposals-Enhanced { proposal-id: proposal-id }))
-        )
+    (let ((proposal-opt (map-get? Proposals-Enhanced { proposal-id: proposal-id })))
         (if (is-some proposal-opt)
             (let (
-                (proposal (unwrap-panic proposal-opt))
-                (current-metrics (map-get? GovernanceMetrics { proposal-id: proposal-id }))
-                (vote-timing (- vote-block (get start-block proposal)))
-                (proposal-duration (- (get end-block proposal) (get start-block proposal)))
-                (timing-category (if (< vote-timing (/ proposal-duration u3))
-                    "early"
-                    (if (< vote-timing (* proposal-duration u2))
-                        "mid"
-                        "late"
-                    )
-                ))
-        )
-        (match current-metrics
-            existing-metrics
-            (let (
-                    (current-dist (get voting-distribution existing-metrics))
-                    (updated-distribution
-                        (if (is-eq timing-category "early")
-                            { 
-                                early: (+ (get early current-dist) u1), 
-                                mid: (get mid current-dist), 
-                                late: (get late current-dist) 
-                            }
-                            (if (is-eq timing-category "mid")
-                                { 
-                                    early: (get early current-dist), 
-                                    mid: (+ (get mid current-dist) u1), 
-                                    late: (get late current-dist) 
-                                }
-                                { 
-                                    early: (get early current-dist), 
-                                    mid: (get mid current-dist), 
-                                    late: (+ (get late current-dist) u1) 
-                                }
-                            )
+                    (proposal (unwrap-panic proposal-opt))
+                    (current-metrics (map-get? GovernanceMetrics { proposal-id: proposal-id }))
+                    (vote-timing (- vote-block (get start-block proposal)))
+                    (proposal-duration (- (get end-block proposal) (get start-block proposal)))
+                    (timing-category (if (< vote-timing (/ proposal-duration u3))
+                        "early"
+                        (if (< vote-timing (* proposal-duration u2))
+                            "mid"
+                            "late"
                         )
-                    )
-                    (new-participant-count (+ (get actual-participants existing-metrics) u1))
-                    (new-participation-rate (calculate-participation-rate
-                        new-participant-count
-                        (get total-eligible-voters existing-metrics)
                     ))
                 )
-                (map-set GovernanceMetrics { proposal-id: proposal-id }
-                    (merge existing-metrics {
-                        actual-participants: new-participant-count,
-                        participation-rate: new-participation-rate,
-                        voting-distribution: updated-distribution,
-                    })
-                )
-            )
-            ;; Initialize metrics if first vote
-            (let (
-                    (eligible-voters (var-get total-registered-voters))
-                    (initial-distribution
-                        (if (is-eq timing-category "early")
-                            { early: u1, mid: u0, late: u0 }
-                            (if (is-eq timing-category "mid")
-                                { early: u0, mid: u1, late: u0 }
-                                { early: u0, mid: u0, late: u1 }
-                            )
+                (match current-metrics
+                    existing-metrics
+                    (let (
+                            (current-dist (get voting-distribution existing-metrics))
+                            (updated-distribution (if (is-eq timing-category "early")
+                                {
+                                    early: (+ (get early current-dist) u1),
+                                    mid: (get mid current-dist),
+                                    late: (get late current-dist),
+                                }
+                                (if (is-eq timing-category "mid")
+                                    {
+                                        early: (get early current-dist),
+                                        mid: (+ (get mid current-dist) u1),
+                                        late: (get late current-dist),
+                                    }
+                                    {
+                                        early: (get early current-dist),
+                                        mid: (get mid current-dist),
+                                        late: (+ (get late current-dist) u1),
+                                    }
+                                )
+                            ))
+                            (new-participant-count (+ (get actual-participants existing-metrics) u1))
+                            (new-participation-rate (calculate-participation-rate new-participant-count
+                                (get total-eligible-voters existing-metrics)
+                            ))
+                        )
+                        (map-set GovernanceMetrics { proposal-id: proposal-id }
+                            (merge existing-metrics {
+                                actual-participants: new-participant-count,
+                                participation-rate: new-participation-rate,
+                                voting-distribution: updated-distribution,
+                            })
                         )
                     )
+                    ;; Initialize metrics if first vote
+                    (let (
+                            (eligible-voters (var-get total-registered-voters))
+                            (initial-distribution (if (is-eq timing-category "early")
+                                {
+                                    early: u1,
+                                    mid: u0,
+                                    late: u0,
+                                }
+                                (if (is-eq timing-category "mid")
+                                    {
+                                        early: u0,
+                                        mid: u1,
+                                        late: u0,
+                                    }
+                                    {
+                                        early: u0,
+                                        mid: u0,
+                                        late: u1,
+                                    }
+                                )
+                            ))
+                        )
+                        (map-set GovernanceMetrics { proposal-id: proposal-id } {
+                            total-eligible-voters: eligible-voters,
+                            actual-participants: u1,
+                            participation-rate: (calculate-participation-rate u1 eligible-voters),
+                            average-vote-time: vote-timing,
+                            voting-distribution: initial-distribution,
+                            category-performance: (get category proposal),
+                            created-at: burn-block-height,
+                        })
+                    )
                 )
-                (map-set GovernanceMetrics { proposal-id: proposal-id } {
-                    total-eligible-voters: eligible-voters,
-                    actual-participants: u1,
-                    participation-rate: (calculate-participation-rate u1 eligible-voters),
-                    average-vote-time: vote-timing,
-                    voting-distribution: initial-distribution,
-                    category-performance: (get category proposal),
-                    created-at: burn-block-height,
-                })
-            )
-        )
                 ;; Update voter activity analytics
                 (update-voter-activity-analytics voter proposal-id vote-block)
                 true
@@ -1030,14 +1062,19 @@
             (let (
                     (new-vote-count (+ (get total-votes-cast existing-activity) u1))
                     (response-time (- vote-block (get start-block proposal)))
-                    (new-avg-response (/ (+ (* (get avg-response-time existing-activity)
-                                                (- new-vote-count u1)
-                                            )
-                                            response-time
-                                        )
-                                        new-vote-count
-                                    ))
-                    (engagement-boost (if (< response-time u100) u5 u1))
+                    (new-avg-response (/
+                        (+
+                            (* (get avg-response-time existing-activity)
+                                (- new-vote-count u1)
+                            )
+                            response-time
+                        )
+                        new-vote-count
+                    ))
+                    (engagement-boost (if (< response-time u100)
+                        u5
+                        u1
+                    ))
                     (new-engagement (+ (get engagement-score existing-activity) engagement-boost))
                 )
                 (map-set VoterActivityAnalytics { voter: voter }
@@ -1070,7 +1107,10 @@
             (current-block burn-block-height)
             (total-proposals (var-get proposal-counter))
             (total-voters (var-get total-registered-voters))
-            (recent-period-start (if (> current-block u1000) (- current-block u1000) u0))
+            (recent-period-start (if (> current-block u1000)
+                (- current-block u1000)
+                u0
+            ))
         )
         (ok {
             total-proposals: total-proposals,
@@ -1080,8 +1120,7 @@
                     (/ (* total-proposals u100) total-voters)
                     u0
                 )
-                total-proposals
-                total-voters
+                total-proposals total-voters
             ),
             analytics-version: analytics-version,
             last-updated: (var-get last-analytics-update),
@@ -1099,7 +1138,10 @@
     )
 )
 
-(define-read-only (get-voting-statistics (period-start uint) (period-end uint))
+(define-read-only (get-voting-statistics
+        (period-start uint)
+        (period-end uint)
+    )
     (if (and (> period-end period-start) (<= period-end burn-block-height))
         (let (
                 (period-length (- period-end period-start))
@@ -1109,7 +1151,10 @@
                 period-start: period-start,
                 period-end: period-end,
                 estimated-activity: estimated-proposals,
-                data-quality: (if (> period-length u1000) "high" "low"),
+                data-quality: (if (> period-length u1000)
+                    "high"
+                    "low"
+                ),
                 generated-at: burn-block-height,
             })
         )
@@ -1147,9 +1192,7 @@
 )
 
 (define-read-only (get-category-performance-analytics (category (string-ascii 20)))
-    (let (
-            (category-requirements (map-get? CategoryRequirements { category: category }))
-        )
+    (let ((category-requirements (map-get? CategoryRequirements { category: category })))
         (match category-requirements
             found-req (ok {
                 category: category,
@@ -1167,7 +1210,10 @@
 )
 
 (define-read-only (analyze-voting-trends (trend-type (string-ascii 20)))
-    (let ((trends (map-get? VotingTrends { trend-type: trend-type, identifier: "global" })))
+    (let ((trends (map-get? VotingTrends {
+            trend-type: trend-type,
+            identifier: "global",
+        })))
         (match trends
             found-trends (ok {
                 trend-type: trend-type,
@@ -1176,11 +1222,16 @@
                 positive-votes: (get positive-votes found-trends),
                 negative-votes: (get negative-votes found-trends),
                 insights: {
-                    dominant-pattern: (if (> (get positive-votes found-trends) (get negative-votes found-trends))
+                    dominant-pattern: (if (> (get positive-votes found-trends)
+                            (get negative-votes found-trends)
+                        )
                         "positive-leaning"
                         "negative-leaning"
                     ),
-                    engagement-quality: (if (> (get sample-size found-trends) u20) "sufficient" "limited"),
+                    engagement-quality: (if (> (get sample-size found-trends) u20)
+                        "sufficient"
+                        "limited"
+                    ),
                     reliability: (get confidence-level found-trends),
                 },
                 generated-at: burn-block-height,
@@ -1214,8 +1265,7 @@
                     (/ (* total-proposals u100) total-voters)
                     u0
                 )
-                total-proposals
-                total-voters
+                total-proposals total-voters
             ),
             participation-metrics: {
                 registered-voters: total-voters,
@@ -1240,7 +1290,10 @@
 (define-read-only (get-participation-trends (blocks-back uint))
     (let (
             (current-block burn-block-height)
-            (analysis-start (if (> current-block blocks-back) (- current-block blocks-back) u0))
+            (analysis-start (if (> current-block blocks-back)
+                (- current-block blocks-back)
+                u0
+            ))
         )
         (if (<= blocks-back max-historical-periods)
             (ok {
